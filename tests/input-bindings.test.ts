@@ -188,6 +188,175 @@ describe('pointer hover tracking — AC1 (pointerKnown + pointermove always proc
 })
 
 // ---------------------------------------------------------------------------
+// Non-finite pointer input guard: NaN/Infinity coords, bounds, arena
+// ---------------------------------------------------------------------------
+
+describe('pointer non-finite input guard — NaN/Infinity never reach pointerX/Y', () => {
+  it('GIVEN a fresh input WHEN primary pointermove has NaN clientX/Y THEN pointerKnown stays false and pointerX/Y are unchanged', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => ({ width: 960, height: 540 }), makeFakeKeyTarget())
+    const initialX = input.pointerX
+    const initialY = input.pointerY
+
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: Number.NaN, clientY: Number.NaN })
+
+    expect(input.pointerKnown).toBe(false)
+    expect(input.pointerX).toBe(initialX)
+    expect(input.pointerY).toBe(initialY)
+    expect(mapInputToCommands(input).some((c) => c.type === 'aim')).toBe(false)
+  })
+
+  it('GIVEN a known pointer WHEN pointermove has NaN or Infinity in only one axis THEN the last good coordinates are kept', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => ({ width: 960, height: 540 }), makeFakeKeyTarget())
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 480, clientY: 270 })
+
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: Number.NaN })
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: Number.POSITIVE_INFINITY, clientY: 100 })
+
+    expect(input.pointerX).toBe(480)
+    expect(input.pointerY).toBe(270)
+    expect(input.pointerKnown).toBe(true)
+  })
+
+  it('GIVEN a fresh input WHEN pointerdown has NaN coords THEN fire is pressed but pointerKnown stays false', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => ({ width: 960, height: 540 }), makeFakeKeyTarget())
+
+    canvas.dispatchPointer('pointerdown', {
+      isPrimary: true, button: 0, pointerId: 7, clientX: Number.NaN, clientY: Number.NaN,
+    })
+
+    expect(input.primaryPressed).toBe(true)
+    expect(input.activePointerId).toBe(7)
+    expect(canvas.setPointerCaptureSpy).toHaveBeenCalledWith(7)
+    expect(input.pointerKnown).toBe(false)
+    expect(Number.isFinite(input.pointerX)).toBe(true)
+    expect(Number.isFinite(input.pointerY)).toBe(true)
+  })
+
+  it.each([
+    ['NaN width', { left: 0, top: 0, width: Number.NaN, height: 540 }],
+    ['NaN height', { left: 0, top: 0, width: 960, height: Number.NaN }],
+    ['Infinity width', { left: 0, top: 0, width: Number.POSITIVE_INFINITY, height: 540 }],
+    ['Infinity height', { left: 0, top: 0, width: 960, height: Number.POSITIVE_INFINITY }],
+    ['NaN left', { left: Number.NaN, top: 0, width: 960, height: 540 }],
+    ['-Infinity top', { left: 0, top: Number.NEGATIVE_INFINITY, width: 960, height: 540 }],
+  ])('GIVEN a known pointer WHEN canvas bounds have %s THEN pointerX/Y keep the prior finite value', (_label, bounds) => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => ({ width: 960, height: 540 }), makeFakeKeyTarget())
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 480, clientY: 270 })
+
+    vi.mocked(canvas.getBoundingClientRect).mockReturnValue(bounds)
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: 100 })
+
+    expect(input.pointerX).toBe(480)
+    expect(input.pointerY).toBe(270)
+  })
+
+  it.each([
+    ['NaN width', { width: Number.NaN, height: 540 }],
+    ['NaN height', { width: 960, height: Number.NaN }],
+    ['Infinity width', { width: Number.POSITIVE_INFINITY, height: 540 }],
+    ['Infinity height', { width: 960, height: Number.POSITIVE_INFINITY }],
+  ])('GIVEN a fresh input WHEN arena has %s THEN pointermove leaves pointer unknown and finite', (_label, arena) => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => arena, makeFakeKeyTarget())
+
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: 100 })
+
+    expect(input.pointerKnown).toBe(false)
+    expect(Number.isFinite(input.pointerX)).toBe(true)
+    expect(Number.isFinite(input.pointerY)).toBe(true)
+  })
+
+  it.each([
+    ['zero width', { width: 0, height: 540 }],
+    ['zero height', { width: 960, height: 0 }],
+    ['negative width', { width: -960, height: 540 }],
+    ['negative height', { width: 960, height: -540 }],
+  ])('GIVEN a fresh input WHEN arena has %s THEN pointermove and pointerdown leave pointer unknown', (_label, arena) => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    bindInput(canvas, input, () => arena, makeFakeKeyTarget())
+    const initialX = input.pointerX
+    const initialY = input.pointerY
+
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: 100 })
+    canvas.dispatchPointer('pointerdown', { isPrimary: true, button: 0, pointerId: 1, clientX: 100, clientY: 100 })
+
+    expect(input.pointerKnown).toBe(false)
+    expect(input.pointerX).toBe(initialX)
+    expect(input.pointerY).toBe(initialY)
+    expect(input.primaryPressed).toBe(true)
+  })
+
+  it('GIVEN a known pointer WHEN arena becomes zero then negative THEN pointerX/Y keep the prior value and pointerKnown stays true', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    let arena = { width: 960, height: 540 }
+    bindInput(canvas, input, () => arena, makeFakeKeyTarget())
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 480, clientY: 270 })
+
+    arena = { width: 0, height: 0 }
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: 100 })
+    expect(input.pointerX).toBe(480)
+    expect(input.pointerY).toBe(270)
+
+    arena = { width: -960, height: -540 }
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 100, clientY: 100 })
+    expect(input.pointerX).toBe(480)
+    expect(input.pointerY).toBe(270)
+    expect(input.pointerKnown).toBe(true)
+  })
+
+  it('GIVEN an unknown pointer after a zero-sized arena WHEN the arena becomes valid THEN the next pointermove updates coordinates and pointerKnown', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    let arena = { width: 0, height: 0 }
+    bindInput(canvas, input, () => arena, makeFakeKeyTarget())
+
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 200, clientY: 100 })
+    expect(input.pointerKnown).toBe(false)
+
+    arena = { width: 960, height: 540 }
+    canvas.dispatchPointer('pointermove', { isPrimary: true, clientX: 200, clientY: 100 })
+
+    expect(input.pointerKnown).toBe(true)
+    expect(input.pointerX).toBeCloseTo(200)
+    expect(input.pointerY).toBeCloseTo(100)
+  })
+
+  it('GIVEN an unknown pointer after rejected NaN pointerdown WHEN a later valid pointermove arrives THEN coordinates update and pointerKnown becomes true', () => {
+    const canvas = makeFakeCanvas()
+    const input = createInputState()
+    let arena = { width: Number.NaN, height: 540 }
+    bindInput(canvas, input, () => arena, makeFakeKeyTarget())
+
+    canvas.dispatchPointer('pointerdown', {
+      isPrimary: true, button: 0, pointerId: 1, clientX: Number.NaN, clientY: 10,
+    })
+    canvas.dispatchPointer('pointermove', { isPrimary: true, pointerId: 1, clientX: 200, clientY: 100 })
+    expect(input.pointerKnown).toBe(false)
+
+    arena = { width: 960, height: 540 }
+    canvas.dispatchPointer('pointermove', { isPrimary: true, pointerId: 1, clientX: 200, clientY: 100 })
+
+    expect(input.pointerKnown).toBe(true)
+    expect(input.pointerX).toBeCloseTo(200)
+    expect(input.pointerY).toBeCloseTo(100)
+    const commands = mapInputToCommands(input)
+    expect(commands.find((c) => c.type === 'aim')).toMatchObject({ type: 'aim', x: 200, y: 100 })
+    expect(commands.some((c) => c.type === 'fire')).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // BLOCKER-3 regression tests: lastAimDirection bug detection
 // ---------------------------------------------------------------------------
 

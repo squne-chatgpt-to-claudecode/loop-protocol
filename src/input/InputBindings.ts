@@ -46,19 +46,40 @@ function updatePointerCoords(
   canvas: CanvasLike,
   input: InputState,
   getArena: () => { width: number; height: number },
-): void {
+): boolean {
   const bounds = canvas.getBoundingClientRect()
   // Issue #1956 fix 4: a temporarily detached or zero-sized Canvas (e.g.
   // mid-layout-transition) reports bounds.width/height <= 0. Dividing by
   // that would write Infinity/NaN into pointerX/pointerY and corrupt
   // downstream aim/assist logic. Leave the previous known-good pointer
   // position in place instead of writing a non-finite value.
-  if (bounds.width <= 0 || bounds.height <= 0) {
-    return
+  // Non-finite (e.g. Infinity) bounds sizes are rejected for the same reason:
+  // they would silently collapse every coordinate to 0 or NaN.
+  if (
+    !(bounds.width > 0 && Number.isFinite(bounds.width)) ||
+    !(bounds.height > 0 && Number.isFinite(bounds.height))
+  ) {
+    return false
   }
   const arena = getArena()
-  input.pointerX = ((event.clientX - bounds.left) / bounds.width) * arena.width
-  input.pointerY = ((event.clientY - bounds.top) / bounds.height) * arena.height
+  // A zero or negative arena size yields finite but meaningless (collapsed or
+  // mirrored) coordinates, so it is rejected just like invalid bounds.
+  if (
+    !(arena.width > 0 && Number.isFinite(arena.width)) ||
+    !(arena.height > 0 && Number.isFinite(arena.height))
+  ) {
+    return false
+  }
+  const x = ((event.clientX - bounds.left) / bounds.width) * arena.width
+  const y = ((event.clientY - bounds.top) / bounds.height) * arena.height
+  // NaN/Infinity event coords, bounds offsets, or arena dimensions surface
+  // here as a non-finite result; keep the last known-good position instead.
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return false
+  }
+  input.pointerX = x
+  input.pointerY = y
+  return true
 }
 
 /**
@@ -140,8 +161,9 @@ export function bindInput(
     }
     input.activePointerId = event.pointerId
     canvasElement.setPointerCapture(event.pointerId)
-    updatePointerCoords(event, canvasElement, input, getArena)
-    input.pointerKnown = true
+    if (updatePointerCoords(event, canvasElement, input, getArena)) {
+      input.pointerKnown = true
+    }
     input.primaryPressed = true
   })
 
@@ -152,8 +174,9 @@ export function bindInput(
     if (!event.isPrimary) {
       return
     }
-    updatePointerCoords(event, canvasElement, input, getArena)
-    input.pointerKnown = true
+    if (updatePointerCoords(event, canvasElement, input, getArena)) {
+      input.pointerKnown = true
+    }
   })
 
   canvasElement.addEventListener('pointerup', (rawEvent: Event) => {
