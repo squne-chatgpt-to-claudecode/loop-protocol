@@ -932,6 +932,38 @@ def test_fail_closed_git_binary_unavailable_for_mutation(tmp_path):
         env=env,
     )
     assert r.returncode == 2, r.stderr
+    # A missing dirname must NOT pass only because the wrapper later reports
+    # "guard script not found" with the same exit code 2. Verify that the
+    # canonical Python guard, not an early shell fallback, rejected mutation.
+    assert "dirname: command not found" not in r.stderr
+    assert "guard script not found" not in r.stderr
+    assert "[worktree_scope_guard] blocked: mutation outside active issue worktree" in r.stderr
+
+
+def test_wrapper_without_python3_fails_closed_with_correct_reason(tmp_path):
+    """Wrapper startup must be independent of dirname even without Python."""
+    import shutil as _sh
+
+    py_dir = tmp_path / "bash-only"
+    py_dir.mkdir()
+    (py_dir / "bash").symlink_to(_sh.which("bash"))
+    env = dict(os.environ)
+    env["PATH"] = str(py_dir)
+    env["CLAUDE_PROJECT_DIR"] = str(REPO_ROOT)
+    env["LOOP_ISSUE_NUMBER"] = "942"
+    payload = {
+        "tool_name": "Bash",
+        "tool_input": {"command": "git commit -m x"},
+        "cwd": str(REPO_ROOT),
+    }
+    r = subprocess.run(
+        ["bash", str(GUARD_SH)], input=json.dumps(payload),
+        text=True, capture_output=True, env=env,
+    )
+    assert r.returncode == 2, r.stderr
+    assert "python3 not found" in r.stderr
+    assert "dirname: command not found" not in r.stderr
+    assert "guard script not found" not in r.stderr
 
 
 # =============================================================================
