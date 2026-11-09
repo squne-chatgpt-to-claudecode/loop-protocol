@@ -433,6 +433,7 @@ class FileBackedFakeGitHubEntryTransport:
 def capability_preflight_result(
     repo: str,
     planned_operations: "tuple[dict, ...] | list[dict]" = (),
+    github_transport: str = "direct-gh",
 ) -> dict:
     """Invoke ``scripts/claude-gpt/workflow_capability_preflight.py`` once and
     return the structured ``CLAUDE_GPT_WORKFLOW_CAPABILITIES_V1`` result
@@ -476,6 +477,14 @@ def capability_preflight_result(
         "--deadline-monotonic-ns",
         str(deadline_ns),
     ]
+    # Explicit opt-in only. Existing direct-gh callers see unchanged argv,
+    # preflight schema, and authorization semantics. No generic GH endpoint.
+    if github_transport not in ("direct-gh", "sealed-host-read"):
+        return {"decision": "blocked", "checks": {}, "actor_capabilities": {},
+                "reasons": ["unsupported_github_transport"]}
+    if github_transport == "sealed-host-read":
+        argv.extend(["--github-transport", "sealed-host-read"])
+
     planned_ops_path: Optional[str] = None
     try:
         if planned_operations:
