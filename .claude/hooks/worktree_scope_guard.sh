@@ -14,8 +14,20 @@
 #   2  — block (bounded stderr)
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# No external dirname: PreToolUse runs with intentionally restricted PATH in
+# the git-unavailable fail-closed test. Resolve our path using Bash builtins.
+case "${BASH_SOURCE[0]}" in
+    */*) SOURCE_DIR="${BASH_SOURCE[0]%/*}" ;;
+    *) SOURCE_DIR="." ;;
+esac
+if ! SCRIPT_DIR="$(cd -- "${SOURCE_DIR}" && pwd)"; then
+    printf '[worktree_scope_guard] blocked: script directory unavailable — fail closed\n' >&2
+    exit 2
+fi
+if ! REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"; then
+    printf '[worktree_scope_guard] blocked: repository root unavailable — fail closed\n' >&2
+    exit 2
+fi
 
 GUARD_SCRIPT="${REPO_ROOT}/scripts/agent-guards/worktree_scope_guard.py"
 
