@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 
@@ -23,6 +22,17 @@ import root_entry_router as router  # noqa: E402
 
 REPO = "squne121/loop-protocol"
 GOOD_MAIN = "a" * 40
+SHIM = "/workspace/remote-ops/claude-code/bin/native-gh-bridge/gh"
+EXPECTED_CHILD_ENV = {
+    "HOME": "/nonexistent",
+    "PATH": "/usr/bin:/bin",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C.UTF-8",
+}
 
 
 def _ok(stdout=""):
@@ -66,6 +76,9 @@ def sealed_reads(monkeypatch):
         raise AssertionError("unapproved probe: " + name)
 
     monkeypatch.setattr(preflight, "_run_probe_with_deadline", check)
+    # The WSL shim does not exist on CI runners; the validator is exercised
+    # directly in dedicated tests below.
+    monkeypatch.setattr(preflight, "_validate_sealed_gh_shim", lambda: None)
     monkeypatch.setattr(
         preflight,
         "_github_auth_probe",
@@ -93,7 +106,7 @@ def test_tokenless_sealed_mode_degraded_not_authentication(sealed_reads):
     assert "sealed_host_read_only_no_docker_auth" in observed["reasons"]
     assert len(sealed_reads) == 2
     assert sealed_reads[0][1] == [
-        "gh",
+        SHIM,
         "repo",
         "view",
         REPO,
@@ -103,17 +116,79 @@ def test_tokenless_sealed_mode_degraded_not_authentication(sealed_reads):
         ".nameWithOwner",
     ]
     assert sealed_reads[1][1] == [
-        "gh",
+        SHIM,
         "api",
         "--method",
         "GET",
         f"repos/{REPO}/git/refs/heads/main",
     ]
     for _, _, kwargs in sealed_reads:
+        assert kwargs["env"] == EXPECTED_CHILD_ENV
+
+
+def test_child_env_is_allowlist_not_ambient_copy(sealed_reads, monkeypatch):
+    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "SSH_AUTH_SOCK",
+                "LD_PRELOAD", "PYTHONPATH", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+                "DBUS_SESSION_BUS_ADDRESS", "GH_HOST", "GH_ENTERPRISE_TOKEN"):
+        monkeypatch.setenv(key, "polluted")
+    _assess()
+    assert sealed_reads
+    for _, _, kwargs in sealed_reads:
         env = kwargs["env"]
-        assert env["HOME"] == "/nonexistent"
-        for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "SSH_AUTH_SOCK", "LD_PRELOAD", "PYTHONPATH"):
-            assert key not in env
+        assert env == EXPECTED_CHILD_ENV
+        assert "polluted" not in env.values()
+
+
+def test_missing_shim_blocks_without_spawning(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        preflight.trusted_uv_mod, "check_trusted_uv",
+        lambda _: {"status": "ok", "reason": "resolved", "diagnostic": None},
+    )
+    monkeypatch.setattr(preflight, "_SEALED_HOST_GH_SHIM", str(tmp_path / "absent" / "gh"))
+    monkeypatch.setattr(
+        preflight.subprocess, "run",
+        lambda *a, **k: pytest.fail("must not spawn when shim is missing"),
+    )
+    value = _assess()
+    assert value["decision"] == "blocked"
+    assert value["checks"]["github"]["repo_read"] is False
+    assert any("spawn_error" in r for r in value["reasons"])
+
+
+@pytest.mark.parametrize("variant", ["symlink", "group_perm", "other_perm", "no_exec", "directory"])
+def test_unsafe_shim_blocks_without_spawning(monkeypatch, tmp_path, variant):
+    real = tmp_path / "real_gh"
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o700)
+    target = tmp_path / "gh"
+    if variant == "symlink":
+        target.symlink_to(real)
+    elif variant == "directory":
+        target.mkdir()
+    else:
+        target.write_text("#!/bin/sh\nexit 0\n")
+        target.chmod({"group_perm": 0o770, "other_perm": 0o705, "no_exec": 0o600}[variant])
+    monkeypatch.setattr(
+        preflight.trusted_uv_mod, "check_trusted_uv",
+        lambda _: {"status": "ok", "reason": "resolved", "diagnostic": None},
+    )
+    monkeypatch.setattr(preflight, "_SEALED_HOST_GH_SHIM", str(target))
+    monkeypatch.setattr(
+        preflight.subprocess, "run",
+        lambda *a, **k: pytest.fail("must not spawn when shim is unsafe"),
+    )
+    value = _assess()
+    assert value["decision"] == "blocked"
+    assert value["checks"]["github"]["repo_read"] is False
+    assert any("malformed_output" in r for r in value["reasons"])
+
+
+def test_safe_shim_passes_validator(monkeypatch, tmp_path):
+    good = tmp_path / "gh"
+    good.write_text("#!/bin/sh\nexit 0\n")
+    good.chmod(0o700)
+    monkeypatch.setattr(preflight, "_SEALED_HOST_GH_SHIM", str(good))
+    assert preflight._validate_sealed_gh_shim() is None
 
 
 @pytest.mark.parametrize(
@@ -273,9 +348,10 @@ def test_live_external_subprocess_sealed_read_bridge_and_auth_denied():
     WSL GH read bridge, then confirms the external read shim denies
     authentication-state subcommands (negative case, expressed as data only).
     """
-    gh = shutil.which("gh")
-    if gh is None:
-        pytest.skip("external gh read shim not present on PATH")
+    # Explicit live run: a missing fixed shim is a FAILURE, never a skip.
+    gh = SHIM
+    assert Path(gh).is_file(), f"fixed sealed gh shim missing: {gh}"
+    shim_env = dict(EXPECTED_CHILD_ENV)
 
     preflight_run = subprocess.run(
         [
@@ -309,6 +385,7 @@ def test_live_external_subprocess_sealed_read_bridge_and_auth_denied():
         text=True,
         timeout=60,
         check=False,
+        env=shim_env,
     )
     assert main_ref.returncode == 0, main_ref.stderr
     payload = json.loads(main_ref.stdout)
@@ -316,17 +393,24 @@ def test_live_external_subprocess_sealed_read_bridge_and_auth_denied():
     assert re.fullmatch(r"[a-f0-9]{40}", payload["object"]["sha"])
 
     # Negative cases: auth-state subcommands must be rejected by the shim.
-    denied_commands = [["gh", "auth", "status"]]
+    denied_commands = [
+        ["auth", "status"],
+        ["pr", "create", "--title", "x", "--body", "x"],
+        ["issue", "comment", "1", "--body", "x"],
+        ["api", "--method", "POST", "repos/foreign/repo/issues"],
+        ["api", "graphql", "-f", "query=query{viewer{login}}"],
+    ]
     for argv in denied_commands:
         denied = subprocess.run(
-            [gh, *argv[1:]],
+            [gh, *argv],
             capture_output=True,
             text=True,
             timeout=60,
             check=False,
+            env=shim_env,
         )
-        assert denied.returncode != 0
-        assert denied.stderr.strip() != ""
+        assert denied.returncode == 73, (argv, denied.returncode, denied.stderr)
+        assert denied.stderr.strip() != "", argv
 
 
 def test_unsupported_transport_fails_before_producer_call(monkeypatch):

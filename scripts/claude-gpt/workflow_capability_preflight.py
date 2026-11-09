@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -167,6 +168,20 @@ _SEALED_HOST_READ_OPERATIONS = frozenset((
     "pr_get", "pr_checks_get", "pr_mergeability_get", "open_pr_list",
 ))
 
+
+# Fixed absolute native GH read shim for sealed-host-read only (never PATH).
+_SEALED_HOST_GH_SHIM = "/workspace/remote-ops/claude-code/bin/native-gh-bridge/gh"
+# Allowlisted child env for the sealed shim; never derived from os.environ.
+_SEALED_HOST_CHILD_ENV = {
+    "HOME": "/nonexistent",
+    "PATH": "/usr/bin:/bin",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C.UTF-8",
+}
 
 PROBE_COMPLETED = "completed"
 PROBE_NONZERO_EXIT = "nonzero_exit"
@@ -341,6 +356,24 @@ def _sanitized_controlled_env() -> dict[str, str]:
     return env
 
 
+def _validate_sealed_gh_shim() -> ProbeOutcome | None:
+    """Return None when the fixed shim is safe; otherwise a blocking outcome.
+
+    lstat (no symlink following): must be a regular file owned by the current
+    UID, with zero group/other permission bits and owner execute set.
+    """
+    try:
+        st = os.lstat(_SEALED_HOST_GH_SHIM)
+    except OSError as exc:
+        return ProbeOutcome(PROBE_SPAWN_ERROR, error_name=exc.__class__.__name__)
+    if (not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.getuid()
+            or (st.st_mode & 0o077) != 0
+            or (st.st_mode & stat.S_IXUSR) == 0):
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    return None
+
+
 def _sealed_host_read_probe(repo: str, deadline_ns: int) -> ProbeOutcome:
     """Prove an ACTUAL tokenless reader can resolve the fixed repo/main.
 
@@ -355,19 +388,17 @@ def _sealed_host_read_probe(repo: str, deadline_ns: int) -> ProbeOutcome:
     # endpoint through this narrowly provisioned transport profile.
     if repo != _DEFAULT_REPO:
         return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
-    env = _sanitized_controlled_env()
-    # Do not carry credentials or caller HOME into the native GH shim. Its
-    # only permitted backend is a fixed WSL sealed host read-only socket.
-    for key in ("GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR",
-                "GH_HOST", "GH_REPO", "SSH_AUTH_SOCK", "SSH_AGENT_PID",
-                "GIT_ASKPASS", "GH_ENTERPRISE_TOKEN", "PYTHONPATH",
-                "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH"):
-        env.pop(key, None)
-    env["HOME"] = "/nonexistent"
-    env["GIT_TERMINAL_PROMPT"] = "0"
+    # Fail closed (no subprocess) unless the fixed absolute shim is a safe,
+    # owner-only, non-symlink regular executable file.
+    shim_problem = _validate_sealed_gh_shim()
+    if shim_problem is not None:
+        return shim_problem
+    # Fresh allowlist env: nothing is copied from the ambient environment.
+    env = dict(_SEALED_HOST_CHILD_ENV)
+    gh_shim = _SEALED_HOST_GH_SHIM
     identity = _run_probe_with_deadline(
         "sealed_host_repository_identity",
-        ["gh", "repo", "view", repo, "--json", "nameWithOwner",
+        [gh_shim, "repo", "view", repo, "--json", "nameWithOwner",
          "--jq", ".nameWithOwner"],
         deadline_ns=deadline_ns,
         cap_seconds=_GITHUB_REPO_READ_PROBE_CAP_SECONDS,
@@ -379,7 +410,7 @@ def _sealed_host_read_probe(repo: str, deadline_ns: int) -> ProbeOutcome:
         return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
     main = _run_probe_with_deadline(
         "sealed_host_main_ref",
-        ["gh", "api", "--method", "GET",
+        [gh_shim, "api", "--method", "GET",
          f"repos/{repo}/git/refs/heads/main"],
         deadline_ns=deadline_ns,
         cap_seconds=_GITHUB_REPO_READ_PROBE_CAP_SECONDS,
