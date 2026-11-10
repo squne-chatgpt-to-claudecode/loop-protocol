@@ -570,7 +570,7 @@ runner（`scripts/agent-ops/run_worktree_agent_runtime_smoke.py`）は `--output
 
 - **未存在の run 固有 output path**: `--output-dir` は run ごとに未存在の一意な worktree-local 相対 path を生成して渡す（例: UTC timestamp + UUID）。`mkdtemp` / `mkdir` で runner 起動前にその出力先を作らない。作成は runner の exclusive-create に任せる。
 - **過去 evidence の保全**: 古い output directory を `rmtree` で削除して再利用しない。失敗 run の evidence も含め、過去の evidence は保持する。
-- **同一 invocation の output path**: 1 invocation で生成した path を、runner に渡す `--output-dir` の実 argv、`summary.md` の読み出し、必要な `evidence.json` の保存・検証に一貫して使う。path が一意であることだけでなく、この配線（argv・summary・structured evidence が同一 run を指すこと）を、runner を起動しない hermetic regression test（生成した argv と読み出し先を直接 assert する）で固定することを推奨する。
+- **同一 invocation の output path**: 1 invocation で生成した path を、runner に渡す `--output-dir` の実 argv、`summary.md` の読み出し、必要な `evidence.json` の保存・検証に一貫して使う。path が一意であることだけでなく、この配線（argv・summary・structured evidence が同一 run を指すこと）を、runner を起動しない hermetic regression test（生成した argv と読み出し先を直接 assert する）で固定することを推奨する。 相対`--output-dir`は runner 側では指定した対象 worktree を基準に解決されるため、pytest 側の`summary.md`や`evidence.json`の読出し先も同じ worktree 基準で組み立て、テストを起動した別ディレクトリの cwd に依存させない。
 - **一時入力と runtime evidence の区別**: `tempfile.mkdtemp` で作る prompt file 等の一時入力は `finally` 等で cleanup を維持してよい。これは runner 証跡の削除とは別であり、証跡は worktree-local に残るだけで、worktree cleanup 後も永久保存されるとは主張しない（retention の設計は本節の範囲外）。
 
 責任範囲の区別: 既存 live test の実装修正は、body-only lane の 1 ファイルを #2986、残り 2 ファイルを #2997 が所有する。VC の記述契約は #2918、VC 内の prompt-file と output-dir の衝突は #2915 が扱う。本節はこれらを重複して所有せず、新規 live test の著者向け指針のみを定める。
