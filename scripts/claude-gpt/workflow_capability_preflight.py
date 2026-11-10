@@ -45,6 +45,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -155,6 +156,32 @@ _ENV_ONLY_PROBE_CAP_SECONDS = 30.0
 _GITHUB_AUTH_PROBE_CAP_SECONDS = 30.0
 _GITHUB_REPO_READ_PROBE_CAP_SECONDS = 30.0
 _CONTROLLED_GITHUB_READ_PROBE_CAP_SECONDS = 15.0
+# Opt-in only: does not replace the default directly authenticated GH lane.
+_TRANSPORT_DIRECT = "direct-gh"
+_TRANSPORT_HOST_READ = "sealed-host-read"
+_SUPPORTED_GITHUB_TRANSPORTS = (_TRANSPORT_DIRECT, _TRANSPORT_HOST_READ)
+# Explicit READ-only operation inventory, not caller supplied booleans.
+# Unknown/write operations are unavailable even if requires_mutation=false.
+_SEALED_HOST_READ_OPERATIONS = frozenset((
+    "issue_get", "issue_metadata_get", "issue_comments_get",
+    "issue_dependencies_get", "repository_identity_get", "base_head_get",
+    "pr_get", "pr_checks_get", "pr_mergeability_get", "open_pr_list",
+))
+
+
+# Fixed absolute native GH read shim for sealed-host-read only (never PATH).
+_SEALED_HOST_GH_SHIM = "/workspace/remote-ops/claude-code/bin/native-gh-bridge/gh"
+# Allowlisted child env for the sealed shim; never derived from os.environ.
+_SEALED_HOST_CHILD_ENV = {
+    "HOME": "/nonexistent",
+    "PATH": "/usr/bin:/bin",
+    "GH_PROMPT_DISABLED": "1",
+    "GH_NO_UPDATE_NOTIFIER": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_TERMINAL_PROMPT": "0",
+    "LC_ALL": "C.UTF-8",
+}
 
 PROBE_COMPLETED = "completed"
 PROBE_NONZERO_EXIT = "nonzero_exit"
@@ -327,6 +354,81 @@ def _sanitized_controlled_env() -> dict[str, str]:
     env["GH_PROMPT_DISABLED"] = "1"
     env["GH_NO_UPDATE_NOTIFIER"] = "1"
     return env
+
+
+def _validate_sealed_gh_shim() -> ProbeOutcome | None:
+    """Return None when the fixed shim is safe; otherwise a blocking outcome.
+
+    lstat (no symlink following): must be a regular file owned by the current
+    UID, with zero group/other permission bits and owner execute set.
+    """
+    try:
+        st = os.lstat(_SEALED_HOST_GH_SHIM)
+    except OSError as exc:
+        return ProbeOutcome(PROBE_SPAWN_ERROR, error_name=exc.__class__.__name__)
+    if (not stat.S_ISREG(st.st_mode)
+            or st.st_uid != os.getuid()
+            or (st.st_mode & 0o077) != 0
+            or (st.st_mode & stat.S_IXUSR) == 0):
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    return None
+
+
+def _sealed_host_read_probe(repo: str, deadline_ns: int) -> ProbeOutcome:
+    """Prove an ACTUAL tokenless reader can resolve the fixed repo/main.
+
+    This observes the GH-compatible read transport; it does not authenticate
+    Docker, prove host-only private keys, or enable GitHub mutations. The
+    caller must select sealed-host-read explicitly, and GH auth status is
+    never synthesized. Missing/invalid responses fail closed.
+    """
+    import re
+
+    # Prevent a foreign repository selector from becoming an arbitrary
+    # endpoint through this narrowly provisioned transport profile.
+    if repo != _DEFAULT_REPO:
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    # Fail closed (no subprocess) unless the fixed absolute shim is a safe,
+    # owner-only, non-symlink regular executable file.
+    shim_problem = _validate_sealed_gh_shim()
+    if shim_problem is not None:
+        return shim_problem
+    # Fresh allowlist env: nothing is copied from the ambient environment.
+    env = dict(_SEALED_HOST_CHILD_ENV)
+    gh_shim = _SEALED_HOST_GH_SHIM
+    identity = _run_probe_with_deadline(
+        "sealed_host_repository_identity",
+        [gh_shim, "repo", "view", repo, "--json", "nameWithOwner",
+         "--jq", ".nameWithOwner"],
+        deadline_ns=deadline_ns,
+        cap_seconds=_GITHUB_REPO_READ_PROBE_CAP_SECONDS,
+        env=env,
+    )
+    if identity.kind != PROBE_COMPLETED:
+        return identity
+    if identity.stdout.strip() != repo:
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    main = _run_probe_with_deadline(
+        "sealed_host_main_ref",
+        [gh_shim, "api", "--method", "GET",
+         f"repos/{repo}/git/refs/heads/main"],
+        deadline_ns=deadline_ns,
+        cap_seconds=_GITHUB_REPO_READ_PROBE_CAP_SECONDS,
+        env=env,
+    )
+    if main.kind != PROBE_COMPLETED:
+        return main
+    try:
+        payload = json.loads(main.stdout)
+    except (ValueError, TypeError):
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    if (not isinstance(payload, dict)
+            or payload.get("ref") != "refs/heads/main"
+            or not isinstance(payload.get("object"), dict)
+            or not isinstance(payload["object"].get("sha"), str)
+            or re.fullmatch(r"[a-f0-9]{40}", payload["object"]["sha"]) is None):
+        return ProbeOutcome(PROBE_MALFORMED_OUTPUT)
+    return main
 
 
 def _root_github_read_capability(github_auth: bool, github_repo_read: bool) -> dict:
@@ -509,6 +611,7 @@ def assess(
     spark_fallback: str | None,
     planned_operations: list[dict],
     deadline_ns: int | None = None,
+    github_transport: str = _TRANSPORT_DIRECT,
 ) -> dict:
     """Assess all capabilities using one absolute monotonic deadline.
 
@@ -534,6 +637,67 @@ def assess(
     # independently of the root `github_auth`/`github_repo_read` outcome)
     # never share their deadline budget with a Spark probe any more --
     # there is no live Spark probe in the decision path at all now.
+    if github_transport not in _SUPPORTED_GITHUB_TRANSPORTS:
+        raise ValueError("unsupported_github_transport")
+    if github_transport == _TRANSPORT_HOST_READ:
+        host_probe = _sealed_host_read_probe(repo, deadline_ns)
+        github_repo_read = host_probe.kind == PROBE_COMPLETED
+        github_auth = False
+        if not github_repo_read:
+            _append_probe_reason(reasons, "sealed_host_read", host_probe)
+            reasons.append("sealed_host_read_unavailable")
+        else:
+            reasons.append("sealed_host_read_only_no_docker_auth")
+        controlled_github_read = {
+            "status": ACTOR_CAPABILITY_UNAVAILABLE,
+            "reason_code": "host_read_does_not_authorize_controlled_mutation",
+            "fallback_route": None,
+            "probe_execution_class": "sealed_host_read_only",
+        }
+        if not uv_ok or spark_mode:
+            if spark_mode:
+                reasons.append("spark:retired: delegation unsupported in sealed host read mode")
+        operations = {}
+        missing_mutation_route = False
+        for entry in planned_operations:
+            operation = entry["operation"]
+            requires_mutation = entry.get("requires_mutation", True)
+            read_only = operation in _SEALED_HOST_READ_OPERATIONS and requires_mutation is False
+            if not read_only:
+                missing_mutation_route = True
+                reasons.append(f"sealed_host_mutation_or_unknown_route:{operation}")
+            operations[operation] = {
+                "route": "sealed_host_read_only" if read_only else "unavailable",
+                "permission": "unverified",
+            }
+        root_capability = {
+            "status": ACTOR_CAPABILITY_DEGRADED if github_repo_read else ACTOR_CAPABILITY_UNAVAILABLE,
+            "reason_code": "sealed_host_read_only" if github_repo_read else "sealed_host_read_unavailable",
+            "fallback_route": None,
+            "probe_execution_class": "sealed_host_actual_repo_and_main_get",
+        }
+        return {
+            "schema": SCHEMA,
+            "profile": profile,
+            "decision": (DECISION_DEGRADED if uv_ok and github_repo_read
+                         and not missing_mutation_route and spark_mode is None
+                         else DECISION_BLOCKED),
+            "checks": {
+                "uv": {"status": uv_result["status"], "reason": uv_result["reason"],
+                       "diagnostic": uv_result.get("diagnostic")},
+                "spark": {"status": _spark_status(spark_mode)},
+                "github": {"auth": False, "repo_read": github_repo_read,
+                           "operations": operations},
+            },
+            "actor_capabilities": {
+                "root_github_read": root_capability,
+                "controlled_github_read": controlled_github_read,
+                "delegated_research_agy": _delegated_research_agy_capability(),
+                "spark_delegation": _spark_delegation_capability(_spark_status(spark_mode)),
+            },
+            "reasons": reasons,
+        }
+
     github_auth_outcome = _github_auth_probe(deadline_ns)
     _append_probe_reason(reasons, "github_auth", github_auth_outcome)
     github_auth = github_auth_outcome.kind == PROBE_COMPLETED
@@ -636,6 +800,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spark-fallback", default=None, choices=["forbidden", "allowed", None])
     parser.add_argument("--planned-operations-json", default=None)
     parser.add_argument("--deadline-monotonic-ns", type=int, default=None)
+    parser.add_argument("--github-transport", choices=_SUPPORTED_GITHUB_TRANSPORTS,
+                        default=_TRANSPORT_DIRECT)
     return parser
 
 
@@ -662,6 +828,7 @@ def main(argv: list[str] | None = None) -> int:
         spark_fallback=args.spark_fallback,
         planned_operations=planned_operations,
         deadline_ns=args.deadline_monotonic_ns,
+        github_transport=args.github_transport,
     )
     print(json.dumps(result, ensure_ascii=False))
     return 0
