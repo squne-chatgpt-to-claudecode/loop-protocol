@@ -1,4 +1,5 @@
 ---
+title: プレイテスト実施・記録・レビューのための手順書
 status: draft
 issue: "#284"
 parent_issue: "#254"
