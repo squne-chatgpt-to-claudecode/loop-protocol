@@ -4,6 +4,7 @@ title: Definition of Ready (DoR) — Implementation Issue（実装 Issue の着�
 status: active
 created_by_issue: 72
 parent_issue: 40
+last_updated: 2026-11-16
 ---
 
 # Definition of Ready (DoR) — Implementation Issue
@@ -232,6 +233,8 @@ exit 5（no tests collected）を「baseline で fail した」と解釈して�
 | Required Skills | テンプレ準拠（必須セクション存在） | 機械判定 |
 | スコープ妥当性・体験判断 | （本 skill の責務外 — `review-issue` Skill / 人間レビュー） | 人間判断 |
 
+> **注記（state ラベル / state_label）**: Issue の state ラベル確認は DoR 条件ではなく、`issue-contract-review` 実行前の preflight 前提条件として扱う。state_label の運用定義は A2 #76 のスコープであり、本 DoR では定義しない。
+
 ## Out of Scope
 
 - DoR 判定 logic の実装（本ドキュメントは判定基準の定義のみ。実装は A1 完了後の follow-up Issue で扱う）
@@ -255,3 +258,11 @@ exit 5（no tests collected）を「baseline で fail した」と解釈して�
 - Anthropic Engineering Blog — Equipping agents for the real world with Agent Skills（引用日: 2026-05-19）
   - https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills
   - Skill は「簡潔・構造化・実利用でテスト済みであるべき」という設計思想の根拠として参照
+
+### AC4 ガイドライン: 引用元の選定基準
+
+本ドキュメント（#72 AC4 の引用要件）で引用元を追加・更新する場合は、以下の基準に従う。
+
+- **一次情報源優先**: 公式ドキュメント・公式ブログ・仕様書・当該 repo の Issue / PR / コメントなど、内容の発信元が直接公開している情報源（primary source）を優先して引用する
+- **二次情報源不採用**: 一次情報源を要約・転載・解説した二次情報（まとめ記事・個人ブログ・転載サイト等）は引用元として採用しない。二次情報で知った内容は、対応する一次情報源を確認してから引用する
+- 引用時は URL と引用日を併記する
