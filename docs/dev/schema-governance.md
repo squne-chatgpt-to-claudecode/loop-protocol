@@ -574,14 +574,17 @@ Issue #2960 / PR #2975 で、`scripts/claude-gpt/auto_mode_canary.py` の `_sut_
 | `AUTO_MODE_CANARY_EVIDENCE_V2` を参照する file | `rg -l "AUTO_MODE_CANARY_EVIDENCE"` | producer と `test_auto_mode_canary_sut_revision.py` のみ。`docs/` 配下は本セクション追加前 0 件 |
 | repo に保存済みの evidence artifact | `git ls-files scripts/claude-gpt/.evidence` と `git log --all -- scripts/claude-gpt/.evidence` | 0 件。出力先 `scripts/claude-gpt/.evidence/` は `.gitignore` 対象で、commit 履歴上も一度も追跡されていない |
 | local checkout 上の保存済み evidence artifact | 本 worktree と main checkout の `scripts/claude-gpt/.evidence/**` を glob | 0 件（file 不在）。`tmp/` も本 worktree に存在しない |
-| PR / Issue comment 内の evidence、repo 外 consumer | GitHub 検索 | 本決定の作成 run では未実施（`gh` 利用禁止の実行制約のため）。canary evidence は repo 外 API として公開・配布されておらず、既知の repo 外 consumer は 0 件。レビュー時に `gh search code "main_sha" --repo squne121/loop-protocol` 等で補完確認できる |
+| GitHub code search: `AUTO_MODE_CANARY_EVIDENCE_V2`（origin default branch / repo 制限なし / origin 除外） | 認証済み GitHub code search（read-only） | origin 2 件（producer と `test_auto_mode_canary_sut_revision.py`）、repo 制限なしでも同じ 2 件、origin 除外では 0 件 |
+| GitHub code search: `sut_revision` と `main_sha` の組み合わせ（repo 制限なし） | 同上 | 1 件。origin の [`test_auto_mode_canary_sut_revision.py`](https://github.com/squne121/loop-protocol/blob/5777e30680bb22aa20442270662114aea7f78e61/scripts/claude-gpt/tests/test_auto_mode_canary_sut_revision.py) の negative assertion のみで、旧 field の consumer ではない |
+| PR / Issue comment 内の evidence | `AUTO_MODE_CANARY_EVIDENCE_V2` を含む Issue comment（#2843, #2960）と PR comment（#2717, #2957, #2975。REST `total_count` 3、`incomplete_results` false）の 5 thread を特定し、全 comment 37 件を取得して目視分類 | 旧 `main_sha` を読む consumer の実例は 0 件。主な根拠は [PR #2975 blocker 3](https://github.com/squne121/loop-protocol/pull/2975#issuecomment-6036924725)、[Issue #2960 の consumer 範囲明確化](https://github.com/squne121/loop-protocol/issues/2960#issuecomment-6037201014)、[PR #2957 の命名不一致指摘](https://github.com/squne121/loop-protocol/pull/2957#issuecomment-6014206466)、[PR #2957 の review disposition](https://github.com/squne121/loop-protocol/pull/2957#issuecomment-6015288040)。#2717 は以前の V2 cutover、#2843 は additive な canary data の議論で、旧 field の reader を示していない |
+| repo 外 consumer の網羅的な不在 | — | **未検証**。GitHub code search は accessible かつ indexed の default branch しか対象にしない。private / unindexed branch、任意の local script、private archive、release / Actions artifact は調べられないため、「repo 外 consumer が存在しない」とは主張しない |
 
-旧 `main_sha` は #2214 で導入され PR #2975 で削除されるまで存在したが、その値を機械的に読み取る consumer はこの期間を通じて repo 内に存在しなかった。
+GitHub 調査は 2026-11-19 10:22 UTC に実施し、code search の結果は main `5777e30` に解決された。旧 `main_sha` は #2214 で導入され PR #2975 で削除されるまで存在したが、その値を機械的に読み取る consumer はこの期間を通じて repo 内に存在しなかった。
 
 ### AUTO_MODE_CANARY_EVIDENCE_V2 Compatibility Decision
 
 - **決定**: schema ID は `AUTO_MODE_CANARY_EVIDENCE_V2` のまま維持し、新 version（V3）は切らない。`main_sha` と `checkout_head_sha` の dual-write や読み取り側 fallback などの移行契約は**不要**とし、何も実装しない。
-- **根拠 1**: 上記 Consumer Fact Check のとおり、旧 `main_sha` を読む production / test-only consumer と保存済み evidence artifact はいずれも 0 件で、rename によって壊れる reader が存在しない。
+- **根拠 1**: 上記 Consumer Fact Check のとおり、旧 `main_sha` を読む repo 内の production / test-only consumer と repo / local の保存済み evidence artifact はいずれも 0 件だった。GitHub の調査範囲（indexed code search と 5 thread の comment 37 件）でも旧 field の reader は見つからなかった。repo 外 consumer の網羅的な不在は未検証のため、本決定は「調査範囲内では rename で壊れる既知の reader が 0 件」という事実に基づく。
 - **根拠 2**: canary evidence は gitignore 対象の local 診断出力で、run ごとに再生成される使い捨て artifact であり、過去 evidence との互換読み取りを要求する運用がない。
 - **根拠 3**: 旧値を dual-write すると、#2960 が是正した「checkout HEAD を live main と誤読させる」問題を残すことになる。
 - **再判定条件**: 旧 `main_sha` を読む repo 外 consumer または保存済み evidence が 1 件以上見つかった場合、本決定は無効とし、移行契約の要否を別 Issue で人間判断する。live main SHA field / dirty-state field の追加は本決定の対象外で、別 Issue の範囲とする。
