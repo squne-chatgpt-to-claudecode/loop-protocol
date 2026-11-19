@@ -562,7 +562,7 @@ notes:
 
 Issue #2960 / PR #2975 で、`scripts/claude-gpt/auto_mode_canary.py` の `_sut_revision()` が出力する `AUTO_MODE_CANARY_EVIDENCE_V2` の `sut_revision.main_sha` を `sut_revision.checkout_head_sha` へ rename した。値は live main ではなく canary を実行した checkout の `git rev-parse HEAD` であり、旧名は live main を主張する誤読を招くための是正である。本 rename は上記「Schema Definition」の定義上 key の remove+add に当たる breaking 変更だが、schema ID は V2 のまま維持された。本セクションはその compatibility / migration 方針の決定記録である。
 
-### Consumer Fact Check（AUTO_MODE_CANARY_EVIDENCE_V2）
+### Consumer Fact Check（旧 field を読む consumer の事実確認結果）
 
 確認時点は main `5777e30`（PR #2975 merge 後）である。
 
@@ -581,7 +581,7 @@ Issue #2960 / PR #2975 で、`scripts/claude-gpt/auto_mode_canary.py` の `_sut_
 
 GitHub 調査は 2026-11-19 10:22 UTC に実施し、code search の結果は main `5777e30` に解決された。旧 `main_sha` は #2214 で導入され PR #2975 で削除されるまで存在したが、その値を機械的に読み取る consumer はこの期間を通じて repo 内に存在しなかった。
 
-### AUTO_MODE_CANARY_EVIDENCE_V2 Compatibility Decision
+### AUTO_MODE_CANARY_EVIDENCE_V2 Compatibility Decision（互換性と移行方針の決定）
 
 - **決定**: schema ID は `AUTO_MODE_CANARY_EVIDENCE_V2` のまま維持し、新 version（V3）は切らない。`main_sha` と `checkout_head_sha` の dual-write や読み取り側 fallback などの移行契約は**不要**とし、何も実装しない。
 - **根拠 1**: 上記 Consumer Fact Check のとおり、旧 `main_sha` を読む repo 内の production / test-only consumer と repo / local の保存済み evidence artifact はいずれも 0 件だった。GitHub の調査範囲（indexed code search と 5 thread の comment 37 件）でも旧 field の reader は見つからなかった。repo 外 consumer の網羅的な不在は未検証のため、本決定は「調査範囲内では rename で壊れる既知の reader が 0 件」という事実に基づく。
